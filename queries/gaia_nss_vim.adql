@@ -1,0 +1,22 @@
+-- queries/gaia_nss_vim.adql
+--
+-- Variability-Induced Movers (VIM): photocentre motion explained by
+-- unresolved variable source (often an eclipsing binary).
+
+SELECT
+    n.source_id,
+    g.random_index,
+    g.ruwe,
+    g.non_single_star,
+
+    n.nss_solution_type,
+    n.variability_classification,
+    n.variability_reduction_level,
+
+    n.algorithm,
+    n.algorithm_version
+
+FROM gaiadr3.nss_vim_fl AS n
+
+JOIN gaiadr3.gaia_source_lite AS g
+    ON g.source_id = n.source_id

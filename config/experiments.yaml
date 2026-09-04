@@ -1,0 +1,89 @@
+# experiments.yaml — master experimental matrix.
+# IDs match the E0–E15 matrix in PRD §40.
+
+experiments:
+  E0:
+    name: "Gaia/2MASS data-quality audit"
+    script: "scripts/build_dataset.py --stage audit"
+    outputs: ["results/tables/e0_audit.md", "results/figures/fig1_cmd.png"]
+
+  E1:
+    name: "PARSEC emulator validation"
+    script: "scripts/train.py --model stellar_emulator"
+    outputs: ["results/tables/e1_emulator.csv", "results/figures/fig_emulator_residuals.png"]
+
+  E2:
+    name: "CMD classical baseline"
+    script: "scripts/train.py --model ridge"
+    outputs: ["results/tables/e2_ridge.csv"]
+
+  E3:
+    name: "RF / XGB / LightGBM"
+    script: "scripts/train.py --model baselines"
+    outputs: ["results/tables/e3_baselines.csv", "results/figures/fig4_models.png"]
+
+  E4:
+    name: "Plain MLP"
+    script: "scripts/train.py --model plain_mlp"
+    outputs: ["results/tables/e4_mlp.csv"]
+
+  E5:
+    name: "PI-NN full"
+    script: "scripts/train.py --model pinn"
+    outputs: ["results/tables/e5_pinn.csv", "results/figures/fig5_mlp_vs_pinn.png"]
+
+  E6:
+    name: "Physics ablation"
+    script: "scripts/train.py --model pinn --ablation"
+    outputs: ["results/tables/e6_ablation.csv", "results/figures/fig6_ablation.png"]
+
+  E7:
+    name: "Synthetic q recovery"
+    script: "scripts/evaluate.py --task q_recovery"
+    outputs: ["results/tables/e7_q_recovery.csv", "results/figures/fig3_displacement_vs_q.png"]
+
+  E8:
+    name: "Gaia NSS validation"
+    script: "scripts/evaluate.py --task nss_validation"
+    outputs: ["results/tables/e8_nss.csv", "results/figures/fig7_nss.png"]
+
+  E9:
+    name: "Gaia binary_masses validation"
+    script: "scripts/evaluate.py --task binary_masses"
+    outputs: ["results/tables/e9_binary_masses.csv"]
+
+  E10:
+    name: "C_phot selection function"
+    script: "scripts/evaluate.py --task selection_phot"
+    outputs: ["results/tables/e10_c_phot.csv", "results/figures/fig8_c_phot.png", "results/figures/fig9_c_phot_vs_d.png"]
+
+  E11:
+    name: "C_astro astrometric selection function"
+    script: "scripts/evaluate.py --task selection_astro"
+    outputs: ["results/tables/e11_c_astro.csv"]
+
+  E12:
+    name: "Complementarity map"
+    script: "scripts/evaluate.py --task complementarity"
+    outputs: ["results/tables/e12_complementarity.csv", "results/figures/fig10_q_vs_p.png", "results/figures/fig11_four_regions.png"]
+
+  E13:
+    name: "Distance robustness"
+    script: "scripts/evaluate.py --task robustness_distance"
+    outputs: ["results/tables/e13_distance.csv"]
+
+  E14:
+    name: "Metallicity robustness"
+    script: "scripts/evaluate.py --task robustness_metallicity"
+    outputs: ["results/tables/e14_metallicity.csv"]
+
+  E15:
+    name: "Isochrone robustness"
+    script: "scripts/evaluate.py --task robustness_isochrones"
+    outputs: ["results/tables/e15_isochrones.csv"]
+
+logging:
+  experiment_id_format: "{model}_{feature_set}_{seed}_{timestamp}"
+  save_config_snapshot: true
+  save_metrics_json: true
+  save_logs: true

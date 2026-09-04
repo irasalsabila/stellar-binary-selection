@@ -1,0 +1,72 @@
+# synthetic.yaml — synthetic population and noise model configuration.
+# See PRD §17–19 and TODO M9–M11.
+
+primary_mass:
+  min_msun: 0.6
+  max_msun: 1.4
+  distribution: "uniform"             # uniform in linear M1
+  main_sequence_only: true
+
+mass_ratio:
+  q_min: 0.1
+  q_max: 1.0
+  # Empirical mass-ratio distribution from Moe & Di Stefano (2017) is
+  # preferred; until then we sample with extra weight around q≈0.3–0.8.
+  weighting:
+    type: "piecewise_log"
+    bins: [[0.10, 0.30, 1.00], [0.30, 0.80, 3.00], [0.80, 1.00, 1.00]]
+
+metallicity:
+  min_feh: -1.0
+  max_feh: 0.5
+  distribution: "uniform"
+
+age:
+  min_gyr: 0.5
+  max_gyr: 12.0
+  distribution: "uniform"
+  # Reject points where the primary has evolved off the main sequence.
+
+distance:
+  min_pc: 20.0
+  max_pc: 200.0
+  distribution: "uniform"
+
+binary_fraction:
+  training_default: 0.5               # balanced for the ML training set
+  preserve_weights_path: "data/synthetic/physical_weights.parquet"
+
+orbital_period:
+  enabled: true
+  min_days: 1.0
+  max_days: 3000.0
+  distribution: "log_uniform"          # log P sampling
+  eccentricity:
+    distribution: "thermal"            # f(e) ∝ 2e
+  inclination: "isotropic"
+  argument_of_periastron: "uniform"
+  longitude_of_ascending_node: "uniform"
+  orbital_phase: "uniform"
+
+extinction:
+  enabled: false                       # toggle on after M6 assessment
+  low_extinction_subset_only: true
+
+noise_model:
+  type: "empirical_from_real"          # derived from real Gaia+2MASS residuals
+  seed: 12345
+  cache_path: "data/processed/noise_model.parquet"
+
+size:
+  initial_systems: 100000
+  maximum_systems: 1000000              # scale up only if useful
+
+splits:
+  train: 0.70
+  validation: 0.15
+  test: 0.15
+  holdout_regions:
+    metallicity: [[-1.0, -0.5]]        # physical-region holdout
+    distance: [[150.0, 200.0]]
+
+random_seed: 42

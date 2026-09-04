@@ -1,0 +1,25 @@
+-- queries/gaia_nss_acceleration.adql
+--
+-- Acceleration solutions: photocentre acceleration detected but no
+-- full orbital solution fitted. Joined against gaia_source_lite to
+-- avoid the full gaia_source scan.
+
+SELECT
+    n.source_id,
+    g.random_index,
+    g.ruwe,
+    g.non_single_star,
+
+    n.nss_solution_type,
+    n.acceleration,
+    n.acceleration_error,
+    n.acceleration_pericentre,
+    n.dec_pole,
+
+    n.algorithm,
+    n.algorithm_version
+
+FROM gaiadr3.nss_acceleration_astro AS n
+
+JOIN gaiadr3.gaia_source_lite AS g
+    ON g.source_id = n.source_id

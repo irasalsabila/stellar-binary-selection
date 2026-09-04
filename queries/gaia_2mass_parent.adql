@@ -1,0 +1,91 @@
+-- queries/gaia_2mass_parent.adql
+--
+-- Initial parent-sample extraction: Gaia DR3 + 2MASS cross-match.
+-- Mirrors the query in plans/Research Product Requirements Document — v1.0.md §11.
+--
+-- Uses the catalogs.tmass mirror (AIP / GAVO). The ESA archive exposes
+-- the 2MASS source catalogue under gaiadr1.tmass_original_valid with
+-- columns named ks_m / ks_msigcom; the AIP mirror uses k_m / k_msigcom.
+-- Adjust the column aliases if you switch archives.
+--
+-- Approximate output size: 100k–300k rows after filtering.
+-- This query is the canonical reproduction artefact for M2.2 and M2.3.
+
+SELECT TOP 250000
+    g.source_id,
+    g.random_index,
+
+    g.ra,
+    g.dec,
+    g.l,
+    g.b,
+
+    g.parallax,
+    g.parallax_error,
+    g.parallax_over_error,
+
+    g.pmra,
+    g.pmdec,
+
+    g.ruwe,
+    g.non_single_star,
+
+    g.visibility_periods_used,
+    g.astrometric_params_solved,
+    g.ipd_frac_multi_peak,
+    g.ipd_gof_harmonic_amplitude,
+
+    g.phot_g_mean_flux,
+    g.phot_g_mean_flux_error,
+    g.phot_g_mean_mag,
+
+    g.phot_bp_mean_flux,
+    g.phot_bp_mean_flux_error,
+    g.phot_bp_mean_mag,
+
+    g.phot_rp_mean_flux,
+    g.phot_rp_mean_flux_error,
+    g.phot_rp_mean_mag,
+
+    g.phot_bp_rp_excess_factor,
+
+    g.phot_bp_n_contaminated_transits,
+    g.phot_bp_n_blended_transits,
+    g.phot_rp_n_contaminated_transits,
+    g.phot_rp_n_blended_transits,
+
+    t.designation,
+    t.j_m,
+    t.j_msigcom,
+    t.h_m,
+    t.h_msigcom,
+    t.k_m AS ks_m,
+    t.k_msigcom AS ks_msigcom,
+    t.ph_qual
+
+FROM gaiadr3.gaia_source AS g
+
+JOIN gaiadr3.tmass_psc_xsc_best_neighbour AS x
+    ON g.source_id = x.source_id
+
+JOIN gaiadr3.tmass_psc_xsc_join AS j
+    ON x.clean_tmass_psc_xsc_oid = j.clean_tmass_psc_xsc_oid
+
+JOIN catalogs.tmass AS t
+    ON j.original_psc_source_id = t.designation
+
+WHERE
+    g.parallax > 5
+    AND g.parallax_over_error > 20
+
+    AND g.phot_g_mean_mag IS NOT NULL
+    AND g.phot_bp_mean_mag IS NOT NULL
+    AND g.phot_rp_mean_mag IS NOT NULL
+
+    AND t.j_m IS NOT NULL
+    AND t.h_m IS NOT NULL
+    AND t.k_m IS NOT NULL
+
+    AND t.ph_qual = 'AAA'
+
+ORDER BY g.random_index

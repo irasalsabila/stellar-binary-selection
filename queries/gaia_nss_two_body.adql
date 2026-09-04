@@ -1,0 +1,36 @@
+-- queries/gaia_nss_two_body.adql
+--
+-- Astrometric / spectroscopic / eclipsing / combined orbital solutions
+-- from the nss_two_body_orbit table. Joined to gaia_source_lite
+-- (NOT gaia_source) to avoid scanning 1.8 billion rows.
+--
+-- Note: a given source_id may legitimately return multiple rows here
+-- (multiple solutions). We preserve all rows and aggregate locally
+-- rather than flattening in the query.
+
+SELECT
+    n.source_id,
+    g.random_index,
+    g.ruwe,
+    g.non_single_star,
+
+    n.nss_solution_type,
+    n.period,
+    n.eccentricity,
+    n.period_error,
+    n.tperi,
+    n.centre_of_mass_velocity,
+    n.goodness_of_fit,
+
+    n.thiele_innes_al,
+    n.thiele_innes_bk,
+    n.thiele_innes_f,
+    n.thiele_innes_g,
+
+    n.algorithm,
+    n.algorithm_version
+
+FROM gaiadr3.nss_two_body_orbit AS n
+
+JOIN gaiadr3.gaia_source_lite AS g
+    ON g.source_id = n.source_id

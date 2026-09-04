@@ -1,0 +1,83 @@
+# data.yaml — observational data acquisition configuration
+#
+# This file pins the observational selections for the Gaia DR3 + 2MASS
+# parent sample. Edits here propagate to scripts/download_gaia.py and
+# scripts/build_dataset.py. Do not silently diverge from the PRD.
+
+gaia:
+  release: "DR3"
+  source_table: "gaiadr3.gaia_source"
+
+  # Mandatory Gaia fields. See PRD §9.1.
+  fields:
+    - source_id
+    - random_index
+    - ra
+    - dec
+    - l
+    - b
+    - parallax
+    - parallax_error
+    - parallax_over_error
+    - pmra
+    - pmdec
+    - ruwe
+    - non_single_star
+    - visibility_periods_used
+    - astrometric_params_solved
+    - ipd_frac_multi_peak
+    - ipd_gof_harmonic_amplitude
+    - phot_g_mean_flux
+    - phot_g_mean_flux_error
+    - phot_g_mean_mag
+    - phot_bp_mean_flux
+    - phot_bp_mean_flux_error
+    - phot_bp_mean_mag
+    - phot_rp_mean_flux
+    - phot_rp_mean_flux_error
+    - phot_rp_mean_mag
+    - phot_bp_rp_excess_factor
+    - phot_bp_n_contaminated_transits
+    - phot_bp_n_blended_transits
+    - phot_rp_n_contaminated_transits
+    - phot_rp_n_blended_transits
+
+tmass:
+  crossmatch:
+    best_neighbour: "gaiadr3.tmass_psc_xsc_best_neighbour"
+    join: "gaiadr3.tmass_psc_xsc_join"
+    source: "gaiadr1.tmass_original_valid"
+  fields:
+    - designation
+    - j_m
+    - j_msigcom
+    - h_m
+    - h_msigcom
+    - ks_m
+    - ks_msigcom
+    - ph_qual
+
+cuts:
+  # Initial high-S/N quality cuts. Documented in PRD §11–12.
+  parallax_min_mas: 5.0                # ⇒ d ≲ 200 pc
+  parallax_over_error_min: 20.0
+  require_g_bp_rp: true                # no nulls in G, BP, RP
+  require_j_h_ks: true                 # no nulls in J, H, Ks
+  tmass_ph_qual: "AAA"                 # high quality in all three 2MASS bands
+
+random_index:
+  enabled: true                        # use Gaia random_index for representative subset
+  target_rows: 250000                  # nominal; final size ≈ 1e5–3e5
+
+population:
+  primary_mass_min_msun: 0.6
+  primary_mass_max_msun: 1.4
+  # FGK envelope is defined empirically in M4 from the CMD; this file
+  # only stores the supporting bounds used during interactive cuts.
+
+paths:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  parent_catalogue: "data/raw/gaia_dr3_2mass_parent.parquet"
+
+random_seed: 42

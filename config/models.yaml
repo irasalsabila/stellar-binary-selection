@@ -1,0 +1,131 @@
+# models.yaml — architecture and training configuration.
+# See PRD §21–26 and TODO M13–M16.
+
+baselines:
+  ridge:
+    enabled: true
+    polynomial_order_max: 5
+    fit_target: "delta_M_G"            # overluminosity vs empirical ridge
+
+  random_forest:
+    enabled: true
+    n_estimators: 500
+    max_depth: null
+    min_samples_leaf: 20
+    n_jobs: -1
+    random_seed: 42
+    save_feature_importance: true
+
+  xgboost:
+    enabled: true
+    n_estimators: 1000
+    learning_rate: 0.05
+    max_depth: 6
+    subsample: 0.8
+    colsample_bytree: 0.8
+    early_stopping_rounds: 50
+    random_seed: 42
+
+  lightgbm:
+    enabled: true
+    n_estimators: 2000
+    learning_rate: 0.03
+    num_leaves: 63
+    min_child_samples: 50
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    early_stopping_rounds: 100
+    random_seed: 42
+
+  plain_mlp:
+    enabled: true
+    hidden_sizes: [128, 128, 64]
+    activation: "gelu"
+    dropout: 0.05
+    epochs: 200
+    batch_size: 512
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+    early_stopping_patience: 20
+
+physics_informed_nn:
+  encoder:
+    hidden_sizes: [128, 128, 64]
+    activation: "gelu"
+    dropout: 0.05
+  latent_bounds:
+    q: [0.05, 1.0]
+    mass_msun: [0.5, 1.6]
+    feh: [-1.2, 0.7]
+    log_age_yr: [9.0, 10.3]
+    distance_pc: [10.0, 250.0]
+  losses:
+    lambda_supervised: 1.0
+    lambda_phot: 1.0
+    lambda_parallax: 0.5
+    lambda_physical_bound: 0.01
+  optimizer:
+    type: "adamw"
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+  training:
+    epochs: 300
+    batch_size: 512
+    early_stopping_patience: 30
+    multiple_seeds: [42, 43, 44]
+
+stellar_emulator:
+  hidden_sizes: [64, 64]
+  activation: "gelu"
+  epochs: 500
+  batch_size: 1024
+  learning_rate: 5.0e-4
+  target_mae_mag_max: 0.02
+
+feature_sets:
+  F1:
+    name: "Gaia only"
+    columns:
+      - phot_g_mean_mag
+      - phot_bp_mean_mag
+      - phot_rp_mean_mag
+      - parallax
+  F2:
+    name: "Gaia + 2MASS"
+    columns:
+      - phot_g_mean_mag
+      - phot_bp_mean_mag
+      - phot_rp_mean_mag
+      - j_m
+      - h_m
+      - ks_m
+      - parallax
+  F3:
+    name: "Gaia + 2MASS + uncertainties"
+    columns:
+      - phot_g_mean_mag
+      - phot_g_mean_flux_error
+      - phot_bp_mean_mag
+      - phot_bp_mean_flux_error
+      - phot_rp_mean_mag
+      - phot_rp_mean_flux_error
+      - j_m
+      - j_msigcom
+      - h_m
+      - h_msigcom
+      - ks_m
+      - ks_msigcom
+      - parallax
+      - parallax_error
+
+leakage:
+  forbidden_inputs:
+    - ruwe
+    - non_single_star
+    - nss_solution_type
+    - ipd_frac_multi_peak
+    - ipd_gof_harmonic_amplitude
+    - any binary_masses column
+  rationale: "Per PRD §38 these must not leak into photometric-model inputs."
+
+random_seed: 42

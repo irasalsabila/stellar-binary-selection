@@ -1,0 +1,28 @@
+-- queries/gaia_binary_masses.adql
+--
+-- Extract the binary_masses subset used to validate recovered mass
+-- ratios q = m2 / m1 (TODO M3.2, PRD §15).
+--
+-- Joins against gaia_source_lite to retrieve the few Gaia-side
+-- columns we actually need (random_index), avoiding a scan of the
+-- full 1.8e9-row gaia_source table.
+--
+-- Includes lower/upper bounds. Systems with only limits are flagged
+-- downstream and never treated as exact q measurements.
+
+SELECT
+    bm.source_id,
+    g.random_index,
+    bm.m1,
+    bm.m1_lower,
+    bm.m1_upper,
+    bm.m2,
+    bm.m2_lower,
+    bm.m2_upper,
+    bm.fluxratio,
+    bm.fluxratio_lower,
+    bm.fluxratio_upper,
+    bm.combination_method
+FROM gaiadr3.binary_masses AS bm
+JOIN gaiadr3.gaia_source_lite AS g
+    ON g.source_id = bm.source_id

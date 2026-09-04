@@ -1,0 +1,83 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+profile_default/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Project artefacts
+data/raw/
+data/processed/
+data/synthetic/
+data/isochrones/parsec/
+results/checkpoints/
+results/figures/
+results/tables/
+results/appendix/
+results/figures_final/
+results/runs/
+results/reports/
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/synthetic/.gitkeep
+!data/isochrones/parsec/.gitkeep
+!results/checkpoints/.gitkeep
+!results/figures/.gitkeep
+!results/tables/.gitkeep
+
+# Project working documents (kept local)
+plans/
+tests/
+.pytest_cache/
+manuscript/
+
+# Local project scaffolding not included in the source repository
+Makefile
+
+# Logs
+*.log
+logs/
+
+# Local downloaded/generated model inputs
+parsec_*.dat.txt
+*.pt
+
+# Gaia Archive async job dumps (VO tables left by astroquery dump_to_file=True)
+*.vot
+*.vot.gz
+*.xml
+scratch/
+
+# OS
+Thumbs.db

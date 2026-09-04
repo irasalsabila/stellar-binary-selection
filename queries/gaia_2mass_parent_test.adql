@@ -1,0 +1,44 @@
+-- queries/gaia_2mass_parent_test.adql
+--
+-- A 1,000-row test variant used to validate the schema and join
+-- before launching the full parent-sample extraction (P0.4).
+--
+-- Uses gaia_source_lite for a faster smoke test and joins against
+-- the catalogs.tmass mirror.
+
+SELECT TOP 1000
+    g.source_id,
+    g.random_index,
+    g.ra,
+    g.dec,
+    g.parallax,
+    g.parallax_error,
+    g.parallax_over_error,
+    g.ruwe,
+    g.non_single_star,
+    g.ipd_frac_multi_peak,
+    g.phot_g_mean_mag,
+    g.phot_bp_mean_mag,
+    g.phot_rp_mean_mag,
+    t.j_m,
+    t.h_m,
+    t.k_m AS ks_m,
+    t.ph_qual
+FROM gaiadr3.gaia_source_lite AS g
+JOIN gaiadr3.tmass_psc_xsc_best_neighbour AS x
+    ON g.source_id = x.source_id
+JOIN gaiadr3.tmass_psc_xsc_join AS j
+    ON x.clean_tmass_psc_xsc_oid = j.clean_tmass_psc_xsc_oid
+JOIN catalogs.tmass AS t
+    ON j.original_psc_source_id = t.designation
+WHERE
+    g.parallax > 5
+    AND g.parallax_over_error > 20
+    AND g.phot_g_mean_mag IS NOT NULL
+    AND g.phot_bp_mean_mag IS NOT NULL
+    AND g.phot_rp_mean_mag IS NOT NULL
+    AND t.j_m IS NOT NULL
+    AND t.h_m IS NOT NULL
+    AND t.k_m IS NOT NULL
+    AND t.ph_qual = 'AAA'
+ORDER BY g.random_index

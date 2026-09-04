@@ -1,0 +1,24 @@
+-- queries/gaia_nss_spectro.adql
+--
+-- Non-linear spectroscopic (SB1/SB2/RV-variable) solutions.
+
+SELECT
+    n.source_id,
+    g.random_index,
+    g.ruwe,
+    g.non_single_star,
+
+    n.nss_solution_type,
+    n.rv_template_teff,
+    n.rv_template_logg,
+    n.rv_template_fe_h,
+    n.centroid_velocity,
+    n.centroid_velocity_error,
+
+    n.algorithm,
+    n.algorithm_version
+
+FROM gaiadr3.nss_non_linear_spectro AS n
+
+JOIN gaiadr3.gaia_source_lite AS g
+    ON g.source_id = n.source_id

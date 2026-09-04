@@ -1,0 +1,8 @@
+source_id,reason,reference
+# Placeholder list. Populate with documented Gaia DR3 false-positive NSS
+# solutions from Halbwachs et al. (2023), Gaia DR3 documentation, and any
+# post-release NSS false-positive catalogues published by ESA/DPAC.
+#
+# Format:
+#   source_id,reason,reference
+#   12345678901234567,"duplicate_solution","Halbwachs+2023_tableA1"
