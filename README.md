@@ -91,7 +91,10 @@ PYTHONPATH=src python scripts/ablation.py --epochs 60 --seeds 42 43 44
 ```bash
 PYTHONPATH=src python scripts/complementarity.py
 PYTHONPATH=src python scripts/validate_nss.py
+PYTHONPATH=src python scripts/make_manuscript_figures.py
 ```
+
+The figure command writes publication-ready PDF files and 600-dpi PNG copies to `results/figures_manuscript/`.
 
 ## Data and Model Conventions
 
