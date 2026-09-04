@@ -35,7 +35,7 @@ notebooks = ["jupyter>=1.0", "ipykernel>=6.25"]
 dev = ["pytest>=7.4", "ruff>=0.5", "mypy>=1.8"]
 
 [project.urls]
-Repository = "https://github.com/example/stellar-binary-selection"
+Repository = "https://github.com/irasalsabila/stellar-binary-selection"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
