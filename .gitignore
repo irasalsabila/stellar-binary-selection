@@ -41,6 +41,7 @@ data/raw/
 data/processed/
 data/synthetic/
 data/isochrones/parsec/
+!stellar-binary-selection-data.zip
 results/checkpoints/
 results/figures/
 results/tables/

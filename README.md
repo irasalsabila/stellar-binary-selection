@@ -27,6 +27,25 @@ scripts/   Data-ingestion, simulation, training, evaluation, and export commands
 
 Large input catalogues, generated model outputs, figures, checkpoints, and run logs are kept outside the source distribution.
 
+## Data Archive
+
+A compact reproducibility archive is provided separately:
+
+```text
+stellar-binary-selection-data.zip
+```
+
+The archive contains:
+
+- The 100,000-system synthetic population.
+- The 47,731-source FGK parent sample.
+- The apparently-single Sample B catalogue.
+- The Gaia NSS Sample C catalogue.
+- The FGK-restricted Sample B and Sample C validation populations, including scored versions.
+- The fitted Gaia and 2MASS noise model.
+
+The archive is approximately 58 MB compressed. The full Gaia parent catalogue, raw archive downloads, isochrone files, generated figures, and model checkpoints are not included.
+
 ## Installation
 
 The environment specification is provided in `environment.yml`.
