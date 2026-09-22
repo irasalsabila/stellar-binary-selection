@@ -39,18 +39,42 @@ SYNTHETIC_FEATURES = [
     "apparent_G", "apparent_BP", "apparent_RP",
     "apparent_J", "apparent_H", "apparent_Ks",
     "sigma_G", "sigma_BP", "sigma_RP", "sigma_J", "sigma_H", "sigma_Ks",
-]
-REAL_FEATURES = [
-    "phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag",
-    "j_m", "h_m", "ks_m",
-    "phot_g_mean_flux_error", "phot_bp_mean_flux_error", "phot_rp_mean_flux_error",
-    "j_msigcom", "h_msigcom", "ks_msigcom",
+    "parallax_obs", "parallax_error",
 ]
 
 
 def feature_matrix(df: pd.DataFrame) -> np.ndarray:
-    cols = SYNTHETIC_FEATURES if "apparent_G" in df.columns else REAL_FEATURES
-    return df[cols].to_numpy(dtype=np.float32)
+    if "apparent_G" in df.columns:
+        return df[SYNTHETIC_FEATURES].to_numpy(dtype=np.float32)
+    # Convert Gaia flux errors to magnitude errors so synthetic and real
+    # features have the same units and semantics before domain comparison.
+    flux_to_mag = 1.0857362047581294
+    sigma = np.column_stack([
+        flux_to_mag * df["phot_g_mean_flux_error"] / df["phot_g_mean_flux"].clip(lower=1e-12),
+        flux_to_mag * df["phot_bp_mean_flux_error"] / df["phot_bp_mean_flux"].clip(lower=1e-12),
+        flux_to_mag * df["phot_rp_mean_flux_error"] / df["phot_rp_mean_flux"].clip(lower=1e-12),
+        df["j_msigcom"], df["h_msigcom"], df["ks_msigcom"],
+    ])
+    mags = df[["phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag", "j_m", "h_m", "ks_m"]].to_numpy(dtype=np.float32)
+    return np.column_stack([mags, sigma, df[["parallax", "parallax_error"]].to_numpy(dtype=np.float32)]).astype(np.float32)
+
+
+def covariate_shift_weights(x_synthetic: np.ndarray, x_real: np.ndarray) -> tuple[np.ndarray, float]:
+    """Estimate clipped synthetic-to-real density ratios and overlap AUC."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import StandardScaler
+
+    x = np.vstack([x_synthetic, x_real])
+    domain = np.concatenate([np.zeros(len(x_synthetic)), np.ones(len(x_real))])
+    scaler = StandardScaler().fit(x)
+    clf = LogisticRegression(max_iter=300, class_weight="balanced", random_state=42)
+    clf.fit(scaler.transform(x), domain)
+    p_all = clf.predict_proba(scaler.transform(x))[:, 1]
+    p_real = p_all[: len(x_synthetic)]
+    odds = p_real / np.clip(1.0 - p_real, 1e-3, None)
+    weights = np.clip(odds, 0.1, 10.0)
+    return weights / np.mean(weights), float(roc_auc_score(domain, p_all))
 
 
 def photometric_score_ol(df: pd.DataFrame) -> np.ndarray:
@@ -120,6 +144,14 @@ def main() -> int:
         help="Sample B: apparently-single control sample.",
     )
     p.add_argument("--fpr", type=float, default=0.01, help="Operating FPR for overluminosity proxy.")
+    p.add_argument(
+        "--domain-adapt", action="store_true",
+        help="Importance-weight synthetic training examples toward the real control feature distribution.",
+    )
+    p.add_argument(
+        "--threshold-source", choices=["synthetic", "real_control"], default="synthetic",
+        help="Population used to set the photometric operating threshold.",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--n-control",
@@ -181,7 +213,17 @@ def main() -> int:
         n_jobs=1,
         random_state=args.seed,
     )
-    clf.fit(Xt, yt)  # no eval_set to avoid deprecation warning + faster
+    sample_weight = None
+    domain_auc = None
+    if args.domain_adapt:
+        sample_weight, domain_auc = covariate_shift_weights(Xt, feature_matrix(sample_b))
+        print(
+            f"  domain weights: min={sample_weight.min():.3f} "
+            f"median={np.median(sample_weight):.3f} max={sample_weight.max():.3f} "
+            f"domain-AUC={domain_auc:.3f}",
+            flush=True,
+        )
+    clf.fit(Xt, yt, sample_weight=sample_weight)  # no eval_set for portability
     proba_test = clf.predict_proba(Xe)[:, 1]
     ap_test = float(average_precision_score(ye, proba_test))
     roc_test = float(roc_auc_score(ye, proba_test))
@@ -195,9 +237,14 @@ def main() -> int:
     parent_derived = parent_derived.assign(p_binary=pbin_par)
 
     # Score on Sample C (real NSS) and a random control from Sample B
-    control_ids = sample_b.sample(
+    control_ids_all = sample_b.sample(
         n=min(args.n_control, len(sample_b)), random_state=args.seed
     )["source_id"].to_numpy()
+    rng_control = np.random.default_rng(args.seed)
+    rng_control.shuffle(control_ids_all)
+    n_cal = max(1, len(control_ids_all) // 2)
+    control_ids_cal = control_ids_all[:n_cal]
+    control_ids = control_ids_all[n_cal:]
     nss_ids = nss_ids_fgk.to_numpy()
 
     p_nss = parent_derived.loc[parent_derived["source_id"].isin(nss_ids), "p_binary"].to_numpy()
@@ -234,21 +281,33 @@ def main() -> int:
     # Overluminosity proxy for comparison
     print("\nOverluminosity proxy on real data...", flush=True)
     ol_nss_df = parent_derived[parent_derived["source_id"].isin(nss_ids)].copy()
-    ol_ctl_df = parent_derived[parent_derived["source_id"].isin(control_ids)].copy()
     # We need a "synthetic singles" reference to calibrate the threshold;
     # use the synthetic singles.
     singles = syn[~syn["is_binary"]]
     ol_synth = photometric_score_ol(syn)
-    thr = float(np.quantile(ol_synth[~syn["is_binary"].to_numpy()], 1 - args.fpr))
-    print(f"  threshold calibrated on synthetic singles (FPR={args.fpr:.3f}): overluminosity > {thr:.4f} mag", flush=True)
     # Build the proxy on the parent (Sample C + control subset)
     parent_derived = parent_derived.assign(ol_proxy=photometric_score_ol(parent_derived))
     ol_nss = parent_derived.loc[parent_derived["source_id"].isin(nss_ids), "ol_proxy"].to_numpy()
     ol_ctl = parent_derived.loc[parent_derived["source_id"].isin(control_ids), "ol_proxy"].to_numpy()
+    ol_ctl_cal = parent_derived.loc[parent_derived["source_id"].isin(control_ids_cal), "ol_proxy"].to_numpy()
+    if args.threshold_source == "real_control":
+        thr = float(np.quantile(ol_ctl_cal, 1 - args.fpr))
+    else:
+        thr = float(np.quantile(ol_synth[~syn["is_binary"].to_numpy()], 1 - args.fpr))
+    print(
+        f"  threshold calibrated on {args.threshold_source} (FPR={args.fpr:.3f}): "
+        f"overluminosity > {thr:.4f} mag", flush=True,
+    )
     rec_nss = float((ol_nss > thr).mean())
     rec_ctl = float((ol_ctl > thr).mean())
+    # A second operating point calibrated on the real control sample separates
+    # domain shift from the intrinsic NSS-vs-control separation.
+    thr_real = float(np.quantile(ol_ctl_cal, 1 - args.fpr))
+    rec_nss_real_cal = float((ol_nss > thr_real).mean())
     print(f"  overluminosity recall on Sample C : {rec_nss:.4f}", flush=True)
-    print(f"  overluminosity FPR on Sample B    : {rec_ctl:.4f} (target {args.fpr:.3f})", flush=True)
+    print(f"  held-out Sample B FPR             : {rec_ctl:.4f} (target {args.fpr:.3f})", flush=True)
+    print(f"  real-calibrated threshold         : {thr_real:.4f} mag", flush=True)
+    print(f"  recall at real-calibrated threshold: {rec_nss_real_cal:.4f}", flush=True)
 
     validation_dir = REPO_ROOT / args.validation_dir
     validation_dir.mkdir(parents=True, exist_ok=True)
@@ -300,20 +359,25 @@ def main() -> int:
             "fpr_target": args.fpr,
             "recall_sample_c": rec_nss,
             "fpr_sample_b": rec_ctl,
+            "real_calibrated_threshold_mag": thr_real,
+            "recall_sample_c_real_calibrated": rec_nss_real_cal,
         },
         "n_nss_scored": int(len(p_nss)),
         "n_control_scored": int(len(p_ctl)),
+        "n_control_calibration": int(len(control_ids_cal)),
         "validation_domain": "FGK overlap of the adopted CMD subset",
         "n_fgk_parent": int(len(parent_derived)),
         "n_sample_b_fgk": int(len(sample_b)),
         "n_sample_b_control_draw": int(len(control_ids)),
         "n_sample_c_entries_fgk": int(nss[nss["source_id"].isin(nss_ids_fgk)].shape[0]),
         "n_sample_c_unique_fgk": int(len(nss_ids_fgk)),
-        "threshold_source": "99th percentile of synthetic single-star overluminosity scores",
+        "threshold_source": args.threshold_source,
         "threshold_fpr_target": float(args.fpr),
-        "threshold_not_calibrated_on_sample_b": True,
+        "domain_adaptation": bool(args.domain_adapt),
+        "synthetic_real_domain_auc": domain_auc,
+        "threshold_not_calibrated_on_sample_b": args.threshold_source != "real_control",
         "feature_domain_check": {
-            "real_features": REAL_FEATURES,
+            "real_features": "magnitudes + magnitude-converted flux errors + parallax",
             "synthetic_features": SYNTHETIC_FEATURES,
             "all_required_columns_present": True,
         },

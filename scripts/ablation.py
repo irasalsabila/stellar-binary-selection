@@ -44,6 +44,8 @@ from stellar_binary_selection.utils import set_global_seed, write_run_metadata  
 # checkpoint is loaded; consumed by compute_losses at reconstruct time.
 EMU_Y_MEAN = None
 EMU_Y_STD = None
+EMU_X_MEAN = None
+EMU_X_STD = None
 
 # Intrinsic main-sequence scatter (mag). Measured from the real Gaia+2MASS
 # apparently-single sample; used as the effective photometric uncertainty
@@ -55,6 +57,7 @@ FEATURE_COLUMNS = [
     "apparent_G", "apparent_BP", "apparent_RP",
     "apparent_J", "apparent_H", "apparent_Ks",
     "sigma_G", "sigma_BP", "sigma_RP", "sigma_J", "sigma_H", "sigma_Ks",
+    "parallax_obs", "parallax_error",
 ]
 
 
@@ -115,7 +118,7 @@ class AblationModel(nn.Module):
         m1 = 0.5 + 1.1 * torch.sigmoid(lat[:, 1])
         log_age = 9.0 + 1.3 * torch.sigmoid(lat[:, 2])
         feh = -1.2 + 1.9 * torch.sigmoid(lat[:, 3])
-        dist = 1.0 + 499.0 * torch.sigmoid(lat[:, 4])
+        dist = 20.0 + 180.0 * torch.sigmoid(lat[:, 4])
         out = {
             "p_logit": p_logit,
             "q": q, "m1": m1, "log_age": log_age, "feh": feh,
@@ -133,7 +136,7 @@ class AblationModel(nn.Module):
         return out
 
 
-def compute_losses(out, batch, level, emulator, obs_idx):
+def compute_losses(out, batch, level, emulator, obs_idx, ridge_coef=None):
     """Return total loss and a dict of individual terms.
 
     Each level adds ONE genuinely new physical ingredient:
@@ -159,7 +162,8 @@ def compute_losses(out, batch, level, emulator, obs_idx):
     sigma = batch["sigma"]
 
     bce = nn.BCEWithLogitsLoss()(out["p_logit"], y_bin)
-    l_q = nn.SmoothL1Loss()(out["q"], y_q)
+    binary = y_bin > 0.5
+    l_q = nn.SmoothL1Loss()(out["q"][binary], y_q[binary]) if binary.any() else out["q"].sum() * 0.0
 
     terms = {"bce": bce, "q": l_q}
     total = bce + 0.5 * l_q
@@ -192,30 +196,28 @@ def compute_losses(out, batch, level, emulator, obs_idx):
         # Implied primary-only apparent magnitude, given the observed
         # (binary) apparent G and the latent q.
         g_obs = obs[:, obs_idx["G"]]
-        g_primary_implied = g_obs - dm
+        # The ridge is in absolute G. Convert the observed apparent G using
+        # the model's distance before applying the binary flux correction.
+        mu_pred = 5.0 * torch.log10(out["distance_pc"].clamp(min=1e-3)) - 5.0
+        g_primary_implied = g_obs - mu_pred - dm
         # The implied single star must sit on the observed main sequence,
         # i.e. its colour (BP-RP) must be consistent with its magnitude.
-        # We use a simple linear MS anchor fit on the batch itself.
+        # Use a ridge fitted once on training singles, not a stochastic
+        # per-batch anchor that changes the physics target during training.
         bp_rp_obs = obs[:, obs_idx["BP"]] - obs[:, obs_idx["RP"]]
-        with torch.no_grad():
-            # robust linear fit of G vs (BP-RP) over the current batch
-            ok = torch.isfinite(g_primary_implied) & torch.isfinite(bp_rp_obs)
-            if ok.sum() > 10:
-                x = bp_rp_obs[ok]
-                y = g_primary_implied[ok]
-                xm, ym = x.mean(), y.mean()
-                slope = ((x - xm) * (y - ym)).sum() / ((x - xm).pow(2).sum() + 1e-8)
-                intercept = ym - slope * xm
-            else:
-                slope = torch.zeros((), device=obs.device)
-                intercept = torch.zeros((), device=obs.device)
-        g_ms_expected = slope.detach() * bp_rp_obs + intercept.detach()
+        if ridge_coef is None:
+            raise ValueError("level >= 2 requires a fixed training-set ridge")
+        g_ms_expected = torch.zeros_like(bp_rp_obs)
+        for coef in ridge_coef:
+            g_ms_expected = g_ms_expected * bp_rp_obs + coef
         resid = (g_primary_implied - g_ms_expected) / sigma_eff_phot[:, obs_idx["G"]]
         l_phot = (resid ** 2).mean()
 
     # --- Level 3: frozen stellar emulator reconstruction ---
     if level >= 3 and emulator is not None:
         def emu_mags(params: torch.Tensor) -> torch.Tensor:
+            if EMU_X_MEAN is not None:
+                params = (params - EMU_X_MEAN) / EMU_X_STD
             raw = emulator(params)
             if EMU_Y_MEAN is not None:
                 return raw * EMU_Y_STD + EMU_Y_MEAN
@@ -240,7 +242,8 @@ def compute_losses(out, batch, level, emulator, obs_idx):
             terms["coevality"] = torch.zeros((), device=obs.device)
         flux_p = torch.pow(10.0, -0.4 * mags_p)
         flux_s = torch.pow(10.0, -0.4 * mags_s)
-        mags_tot = -2.5 * torch.log10((flux_p + flux_s).clamp(min=1e-30))
+        p_bin = torch.sigmoid(out["p_logit"])
+        mags_tot = -2.5 * torch.log10((flux_p + p_bin.unsqueeze(-1) * flux_s).clamp(min=1e-30))
         mu = 5.0 * torch.log10(out["distance_pc"].clamp(min=1e-3)) - 5.0
         apparent_pred = mags_tot + mu.unsqueeze(-1)
         resid = (apparent_pred - obs[:, :6]) / sigma_eff_phot
@@ -253,12 +256,11 @@ def compute_losses(out, batch, level, emulator, obs_idx):
     if level >= 1:
         total = total + 0.5 * l_par
     if level >= 2:
-        # The photometric reconstruction term is normalised by the
-        # measurement uncertainties, so its raw scale can be orders of
-        # magnitude larger than the supervised terms. Weight it down and
-        # clamp it so it cannot swamp the q / binary heads (which
-        # otherwise collapse to a constant predictor).
-        total = total + 0.5 * l_phot
+        # The photometric reconstruction term is normalized by effective
+        # scatter, but the analytic rung can still have a large raw scale.
+        # Keep its contribution comparable to BCE/q, as in the production
+        # PINN, so the ablation measures physics rather than loss dominance.
+        total = total + 0.05 * l_phot
     if level >= 4:
         total = total + 0.5 * terms["coevality"]
 
@@ -266,8 +268,8 @@ def compute_losses(out, batch, level, emulator, obs_idx):
     l_bound = (
         torch.relu(0.05 - out["q"]).pow(2).mean()
         + torch.relu(out["q"] - 1.0).pow(2).mean()
-        + torch.relu(0.6 - out["m1"]).pow(2).mean()
-        + torch.relu(out["m1"] - 1.4).pow(2).mean()
+        + torch.relu(0.5 - out["m1"]).pow(2).mean()
+        + torch.relu(out["m1"] - 1.6).pow(2).mean()
     )
     terms["bound"] = l_bound
     total = total + 0.01 * l_bound
@@ -278,28 +280,40 @@ def train_one(df, level, seed, epochs, batch_size, emulator, device):
     set_global_seed(seed)
     train, val, test = split(df, seed=seed)
 
-    Xtr = torch.from_numpy(feature_matrix(train))
+    xtr_np = feature_matrix(train)
+    x_mean = xtr_np.mean(axis=0, keepdims=True)
+    x_std = xtr_np.std(axis=0, keepdims=True)
+    x_std[x_std < 1e-6] = 1.0
+    Xtr = torch.from_numpy(((xtr_np - x_mean) / x_std).astype(np.float32))
+    Xobs = torch.from_numpy(xtr_np.astype(np.float32))
     ybin = torch.from_numpy(train["is_binary"].to_numpy(dtype=np.float32))
     yq = torch.from_numpy(train["q"].to_numpy(dtype=np.float32))
-    ypar = torch.from_numpy((1000.0 / train["distance_pc"]).to_numpy(dtype=np.float32))
+    ypar = torch.from_numpy(train["parallax_obs"].to_numpy(dtype=np.float32))
     sig = torch.from_numpy(
         train[[f"sigma_{b}" for b in ("G", "BP", "RP", "J", "H", "Ks")]].to_numpy(dtype=np.float32)
     )
-    ds = TensorDataset(Xtr, ybin, yq, ypar, sig)
+    ds = TensorDataset(Xtr, Xobs, ybin, yq, ypar, sig)
     dl = DataLoader(ds, batch_size=batch_size, shuffle=True)
 
     model = AblationModel(Xtr.shape[1], level, emulator).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
 
     obs_idx = {b: i for i, b in enumerate(("G", "BP", "RP", "J", "H", "Ks"))}
+    singles = train[~train["is_binary"]]
+    bp_rp_single = (singles["apparent_BP"] - singles["apparent_RP"]).to_numpy()
+    par_single = singles["parallax_obs"].clip(lower=1e-3).to_numpy()
+    mg_single = singles["apparent_G"].to_numpy() - 5.0 * np.log10(1000.0 / par_single) + 5.0
+    ridge_coef = np.polyfit(bp_rp_single, mg_single, 3)[::-1].astype(np.float32)
 
     model.train()
     term_log: dict[str, list[float]] = {}
     for _ in tqdm(range(epochs), desc=f"L{level} seed{seed}", leave=False, unit="epoch"):
-        for xb, yb, yq_, yp_, sg_ in dl:
+        for xb, xobs, yb, yq_, yp_, sg_ in dl:
             xb = xb.to(device)
+            xobs = xobs.to(device)
             batch = {
-                "x": xb,
+                # Keep physical magnitudes separate from standardized encoder inputs.
+                "x": xobs,
                 "y_bin": yb.to(device),
                 "y_q": yq_.to(device),
                 "y_par": yp_.to(device),
@@ -307,7 +321,7 @@ def train_one(df, level, seed, epochs, batch_size, emulator, device):
             }
             opt.zero_grad()
             out = model(xb)
-            loss, terms = compute_losses(out, batch, level, emulator, obs_idx)
+            loss, terms = compute_losses(out, batch, level, emulator, obs_idx, ridge_coef)
             loss.backward()
             opt.step()
             # track the scale of each term to diagnose dominance / collapse
@@ -318,7 +332,7 @@ def train_one(df, level, seed, epochs, batch_size, emulator, device):
 
     # ---- evaluate on the frozen test split ----
     model.eval()
-    Xte = torch.from_numpy(feature_matrix(test)).to(device)
+    Xte = torch.from_numpy(((feature_matrix(test) - x_mean) / x_std).astype(np.float32)).to(device)
     with torch.no_grad():
         out = model(Xte)
         proba = torch.sigmoid(out["p_logit"]).cpu().numpy()
@@ -355,35 +369,34 @@ def main() -> int:
     # Load the frozen stellar emulator for levels >= 3.
     emulator = None
     ckpt = REPO_ROOT / args.emulator
-    if ckpt.exists():
-        state = torch.load(ckpt, map_location=device, weights_only=False)
-        emulator = StellarEmulator(hidden=(128, 128, 128, 64))
-        try:
-            emulator.load_state_dict(state["state_dict"])
-        except Exception as exc:  # noqa: BLE001
-            print(f"  (could not load emulator weights: {exc})")
-            emulator = StellarEmulator(hidden=(64, 64))
-        emulator = emulator.to(device)
-        for prm in emulator.parameters():
-            prm.requires_grad_(False)
-        emulator.eval()
-        # The emulator was trained on NORMALISED magnitudes, so its raw
-        # output is in standard-deviation units, not magnitudes. Store the
-        # de-normalisation constants and apply them at reconstruct time,
-        # otherwise the photometric residual is ~1e7 and meaningless.
-        global EMU_Y_MEAN, EMU_Y_STD
-        _ym = state.get("y_mean")
-        _ys = state.get("y_std")
-        if _ym is not None:
-            EMU_Y_MEAN = torch.as_tensor(_ym, dtype=torch.float32, device=device)
-            EMU_Y_STD = torch.as_tensor(_ys, dtype=torch.float32, device=device)
-        print(f"Loaded frozen emulator from {ckpt.name}", flush=True)
-    else:
-        print(f"  emulator checkpoint not found at {ckpt}; levels 3-4 will skip photometric term", flush=True)
-        emulator = StellarEmulator(hidden=(128, 128, 128, 64)).to(device)
-        for prm in emulator.parameters():
-            prm.requires_grad_(False)
-        emulator.eval()
+    if not ckpt.exists():
+        raise FileNotFoundError(
+            f"A trained emulator checkpoint is required for the ablation: {ckpt}"
+        )
+    state = torch.load(ckpt, map_location=device, weights_only=False)
+    emulator = StellarEmulator(hidden=(128, 128, 128, 64))
+    try:
+        emulator.load_state_dict(state["state_dict"])
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Could not load emulator weights from {ckpt}") from exc
+    emulator = emulator.to(device)
+    for prm in emulator.parameters():
+        prm.requires_grad_(False)
+    emulator.eval()
+    # The emulator was trained on NORMALISED magnitudes, so its raw output is
+    # in standard-deviation units. Store de-normalisation constants here.
+    global EMU_X_MEAN, EMU_X_STD, EMU_Y_MEAN, EMU_Y_STD
+    _xm = state.get("x_mean")
+    _xs = state.get("x_std")
+    _ym = state.get("y_mean")
+    _ys = state.get("y_std")
+    if _xm is not None:
+        EMU_X_MEAN = torch.as_tensor(_xm, dtype=torch.float32, device=device)
+        EMU_X_STD = torch.as_tensor(_xs, dtype=torch.float32, device=device)
+    if _ym is not None:
+        EMU_Y_MEAN = torch.as_tensor(_ym, dtype=torch.float32, device=device)
+        EMU_Y_STD = torch.as_tensor(_ys, dtype=torch.float32, device=device)
+    print(f"Loaded frozen emulator from {ckpt.name}", flush=True)
 
     levels = {
         0: "NN-0 (plain MLP)",

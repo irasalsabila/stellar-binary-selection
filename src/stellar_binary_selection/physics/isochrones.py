@@ -118,7 +118,8 @@ class ParsecGrid(IsochroneGrid):
             self.mag_cols[band] = col
 
     def _build_interpolator(self) -> None:
-        from scipy.interpolate import LinearNDInterpolator
+        from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+        from scipy.spatial import Delaunay
 
         mass = self.df[self.mass_col].to_numpy(dtype=float)
         log_age = self.df[self.log_age_col].to_numpy(dtype=float)
@@ -126,6 +127,9 @@ class ParsecGrid(IsochroneGrid):
         if np.nanmedian(log_age) > 100:  # linear age in yr
             log_age = np.log10(log_age)
         feh = self.df[self.feh_col].to_numpy(dtype=float)
+        self.mass_range = (float(np.nanmin(mass)), float(np.nanmax(mass)))
+        self.log_age_range = (float(np.nanmin(log_age)), float(np.nanmax(log_age)))
+        self.feh_range = (float(np.nanmin(feh)), float(np.nanmax(feh)))
 
         points = np.column_stack([mass, log_age, feh])
         mags = np.column_stack(
@@ -133,13 +137,35 @@ class ParsecGrid(IsochroneGrid):
         )
         keep = np.isfinite(points).all(axis=1) & np.isfinite(mags).all(axis=1)
         self._interp = LinearNDInterpolator(points[keep], mags[keep])
+        self._nearest = NearestNDInterpolator(points[keep], mags[keep])
+        self._hull = Delaunay(points[keep])
+
+    def support_mask(self, mass, log_age, feh) -> np.ndarray:
+        """Return rows with finite linear interpolation in every band."""
+        mass = np.atleast_1d(np.asarray(mass, dtype=float))
+        log_age = np.broadcast_to(np.atleast_1d(np.asarray(log_age, dtype=float)), mass.shape)
+        feh = np.broadcast_to(np.atleast_1d(np.asarray(feh, dtype=float)), mass.shape)
+        points = np.column_stack([mass, log_age, feh])
+        values = self._interp(points)
+        return np.isfinite(values).all(axis=1)
 
     def absolute_magnitudes(self, mass, log_age, feh):
         mass = np.atleast_1d(np.asarray(mass, dtype=float))
         log_age = np.atleast_1d(np.asarray(log_age, dtype=float))
         feh = np.atleast_1d(np.asarray(feh, dtype=float))
         out = self._interp(mass, log_age, feh)
-        return np.nan_to_num(out, nan=np.nanmedian(out) if np.isfinite(out).any() else 10.0)
+        bad_rows = ~np.isfinite(out).all(axis=1)
+        self.last_nearest_fallback_count = int(bad_rows.sum())
+        if bad_rows.any():
+            # Linear interpolation has small convex-hull holes in the sparse
+            # CMD grid. Nearest-neighbour fallback preserves a real isochrone
+            # point; median filling would fabricate unphysical photometry.
+            out[bad_rows] = self._nearest(
+                np.column_stack([mass[bad_rows], log_age[bad_rows], feh[bad_rows]])
+            )
+        if not np.isfinite(out).all():
+            raise ValueError("PARSEC interpolation produced non-finite magnitudes")
+        return out
 
 
 class MistGrid(IsochroneGrid):

@@ -57,6 +57,7 @@ def feature_matrix(df: pd.DataFrame) -> np.ndarray:
         "apparent_G", "apparent_BP", "apparent_RP",
         "apparent_J", "apparent_H", "apparent_Ks",
         "sigma_G", "sigma_BP", "sigma_RP", "sigma_J", "sigma_H", "sigma_Ks",
+        "parallax_obs", "parallax_error",
     ]
     return df[cols].to_numpy(dtype=np.float32)
 
@@ -126,35 +127,77 @@ def train_mlp(df: pd.DataFrame, seed: int = 42, epochs: int = 5) -> dict:
     return metrics
 
 
-def train_pinn(df: pd.DataFrame, seed: int = 42, epochs: int = 3) -> dict:
+def train_pinn(df: pd.DataFrame, seed: int = 42, epochs: int = 100, emulator_path: Path | None = None) -> dict:
     """Train the PI-NN on synthetic data (full pipeline)."""
     import torch
     from torch.utils.data import DataLoader, TensorDataset
 
     set_global_seed(seed)
     train, val, test = split(df, seed=seed)
-    Xtr = torch.from_numpy(feature_matrix(train)).float()
+    xtr_np = feature_matrix(train)
+    x_mean = xtr_np.mean(axis=0, keepdims=True)
+    x_std = xtr_np.std(axis=0, keepdims=True)
+    x_std[x_std < 1e-6] = 1.0
+    Xtr = torch.from_numpy(((xtr_np - x_mean) / x_std).astype(np.float32))
     y_bin = torch.from_numpy(train["is_binary"].to_numpy(dtype=np.float32))
     y_q = torch.from_numpy(train["q"].to_numpy(dtype=np.float32))
-    y_par = torch.from_numpy((1000.0 / train["distance_pc"].to_numpy(dtype=np.float32)))
-    Xte = torch.from_numpy(feature_matrix(test)).float()
+    y_par = torch.from_numpy(train["parallax_obs"].to_numpy(dtype=np.float32))
+    y_mag = torch.from_numpy(train[[f"apparent_{b}" for b in ("G", "BP", "RP", "J", "H", "Ks")]].to_numpy(dtype=np.float32))
+    sigma_mag = torch.from_numpy(train[[f"sigma_{b}" for b in ("G", "BP", "RP", "J", "H", "Ks")]].to_numpy(dtype=np.float32))
+    Xte = torch.from_numpy(((feature_matrix(test) - x_mean) / x_std).astype(np.float32))
     yte = test["is_binary"].to_numpy(int)
 
-    emulator = StellarEmulator()
-    model = PhysicsInformedNN(in_dim=Xtr.shape[1], emulator=emulator)
+    emulator = None
+    emu_x_mean = emu_x_std = emu_y_mean = emu_y_std = None
+    if emulator_path is None or not emulator_path.exists():
+        raise FileNotFoundError(
+            "A trained emulator checkpoint is required for the PINN; "
+            f"not found: {emulator_path}"
+        )
+    if emulator_path.exists():
+        state = torch.load(emulator_path, map_location="cpu", weights_only=False)
+        emulator = StellarEmulator(hidden=(128, 128, 128, 64))
+        emulator.load_state_dict(state["state_dict"])
+        emu_x_mean = torch.as_tensor(state["x_mean"], dtype=torch.float32)
+        emu_x_std = torch.as_tensor(state["x_std"], dtype=torch.float32)
+        emu_y_mean = torch.as_tensor(state["y_mean"], dtype=torch.float32)
+        emu_y_std = torch.as_tensor(state["y_std"], dtype=torch.float32)
+        for prm in emulator.parameters():
+            prm.requires_grad_(False)
+        emulator.eval()
+    model = PhysicsInformedNN(
+        in_dim=Xtr.shape[1], emulator=emulator,
+        emulator_x_mean=emu_x_mean, emulator_x_std=emu_x_std,
+        emulator_y_mean=emu_y_mean, emulator_y_std=emu_y_std,
+    )
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
     bce = torch.nn.BCEWithLogitsLoss()
     sl1 = torch.nn.SmoothL1Loss()
-    loader = DataLoader(TensorDataset(Xtr, y_bin, y_q, y_par), batch_size=512, shuffle=True)
+    loader = DataLoader(TensorDataset(Xtr, y_bin, y_q, y_par, y_mag, sigma_mag), batch_size=512, shuffle=True)
     for epoch in tqdm(range(epochs), desc="pinn epochs", leave=False):
         model.train()
-        for xb, yb, yq, yp in loader:
+        for xb, yb, yq, yp, ym, ys in loader:
             opt.zero_grad()
             out = model(xb)
-            l_bin = bce(torch.logit(out["p_binary"].clamp(1e-6, 1 - 1e-6)), yb)
-            l_q = sl1(out["q"], yq)
-            l_par = ((out["parallax_pred"] - yp) ** 2).mean()
-            loss = l_bin + 0.5 * l_q + 0.5 * l_par
+            l_bin = bce(out["p_logit"], yb)
+            binary = yb > 0.5
+            l_q = sl1(out["q"][binary], yq[binary]) if binary.any() else out["q"].sum() * 0.0
+            l_par = (((out["parallax_pred"] - yp) / yp.clamp(min=1e-3)) ** 2).mean()
+            l_phot = out["p_binary"].sum() * 0.0
+            if "apparent_mags_single" in out:
+                sigma_eff = torch.sqrt(ys**2 + 0.25**2)
+                # Mixture likelihood: every observation may be single or
+                # binary, while each branch remains physically exact.
+                logp_single = -0.5 * (((ym - out["apparent_mags_single"]) / sigma_eff) ** 2).sum(dim=1)
+                logp_binary = -0.5 * (((ym - out["apparent_mags_binary"]) / sigma_eff) ** 2).sum(dim=1)
+                log_mix = torch.logsumexp(
+                    torch.stack([
+                        torch.log1p(-out["p_binary"].clamp(max=1 - 1e-6)) + logp_single,
+                        torch.log(out["p_binary"].clamp(min=1e-6)) + logp_binary,
+                    ], dim=0), dim=0,
+                )
+                l_phot = (-log_mix / ym.shape[1]).mean()
+            loss = l_bin + 0.5 * l_q + 0.5 * l_par + 0.05 * l_phot
             loss.backward()
             opt.step()
     model.eval()
@@ -162,6 +205,11 @@ def train_pinn(df: pd.DataFrame, seed: int = 42, epochs: int = 3) -> dict:
         out = model(Xte)
         proba = out["p_binary"].numpy()
     metrics = binary_classification_metrics(yte, proba)
+    binary = yte.astype(bool)
+    if binary.any():
+        metrics.update({f"q_{k}": v for k, v in regression_metrics(
+            test.loc[binary, "q"].to_numpy(dtype=float), out["q"].numpy()[binary]
+        ).items()})
     metrics["model"] = "pinn"
     return metrics
 
@@ -171,7 +219,8 @@ def main() -> int:
     p.add_argument("--model", choices=["ridge", "rf", "xgb", "lgbm", "plain_mlp", "pinn", "baselines"], required=True)
     p.add_argument("--synthetic", default="data/synthetic/synthetic_v1.parquet")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--emulator", default="results/checkpoints/stellar_emulator.pt")
     p.add_argument("--metadata-dir", default="results/runs/train")
     args = p.parse_args()
 
@@ -193,7 +242,7 @@ def main() -> int:
     elif args.model == "plain_mlp":
         summary = train_mlp(df, seed=args.seed, epochs=args.epochs)
     elif args.model == "pinn":
-        summary = train_pinn(df, seed=args.seed, epochs=args.epochs)
+        summary = train_pinn(df, seed=args.seed, epochs=args.epochs, emulator_path=REPO_ROOT / args.emulator)
     else:
         raise ValueError(args.model)
 

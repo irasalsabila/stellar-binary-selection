@@ -100,8 +100,8 @@ def main() -> int:
         mag = pd.to_numeric(df[mag_col], errors="coerce")
 
         if err_col.endswith("sigcom"):
-            # 2MASS: already a magnitude uncertainty
-            sigma = pd.to_numeric(df[err_col], errors="coerce") / 1000.0  # mmag → mag
+            # 2MASS `*_msigcom` is already reported in magnitudes, not mmag.
+            sigma = pd.to_numeric(df[err_col], errors="coerce")
         else:
             # Gaia: flux error + flux → magnitude error
             flux_col = mag_col.replace("_mean_mag", "_mean_flux")

@@ -109,8 +109,8 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", default=str(OUT_PATH), help="Output parquet path.")
     p.add_argument(
-        "--mass-min", type=float, default=0.6,
-        help="Lower mass cut (Msun) applied to the final grid.",
+        "--mass-min", type=float, default=0.09,
+        help="Lower mass cut (Msun) applied to the final grid; PARSEC raw grids reach 0.09.",
     )
     p.add_argument(
         "--mass-max", type=float, default=1.4,

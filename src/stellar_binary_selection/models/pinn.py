@@ -50,17 +50,27 @@ class PhysicsInformedNN(nn.Module):
         self,
         in_dim: int,
         emulator: nn.Module | None,
+        emulator_x_mean: torch.Tensor | None = None,
+        emulator_x_std: torch.Tensor | None = None,
+        emulator_y_mean: torch.Tensor | None = None,
+        emulator_y_std: torch.Tensor | None = None,
         hidden: tuple[int, ...] = (128, 128, 64),
         dropout: float = 0.05,
     ):
         super().__init__()
         self.emulator = emulator  # may be None during ablation studies
+        self.register_buffer("emulator_x_mean", emulator_x_mean)
+        self.register_buffer("emulator_x_std", emulator_x_std)
+        self.register_buffer("emulator_y_mean", emulator_y_mean)
+        self.register_buffer("emulator_y_std", emulator_y_std)
         out_dim = 7  # p_bin, q, M1, log_age, feh, distance_pc, parallax_pred
         self.encoder = _make_mlp(in_dim, list(hidden), out_dim, dropout)
         self.q_min = 0.05
         self.q_max = 1.0
-        self.distance_min = 1.0
-        self.distance_max = 500.0
+        # Match the supported synthetic population instead of allowing the
+        # inverse model to spend capacity in unrepresented distance tails.
+        self.distance_min = 20.0
+        self.distance_max = 200.0
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encoder(x)
@@ -72,7 +82,8 @@ class PhysicsInformedNN(nn.Module):
         feh = -1.2 + 1.9 * torch.sigmoid(z[:, 4])  # -1.2–0.7
         dist = self.distance_min + (self.distance_max - self.distance_min) * torch.sigmoid(z[:, 5])
         parallax_pred = 1000.0 / dist
-        return {
+        out = {
+            "p_logit": z[:, 0],
             "p_binary": p_bin,
             "q": q,
             "m1": m1,
@@ -82,6 +93,32 @@ class PhysicsInformedNN(nn.Module):
             "parallax_pred": parallax_pred,
             "latent": z,
         }
+        if self.emulator is not None:
+            # The emulator was trained on standardized (mass, log-age, [Fe/H]).
+            # Use p_binary to smoothly turn off the secondary for singles.
+            params_p = torch.stack([m1, log_age, feh], dim=1)
+            params_s = torch.stack([m1 * q, log_age, feh], dim=1)
+            if self.emulator_x_mean is not None:
+                params_p = (params_p - self.emulator_x_mean) / self.emulator_x_std
+                params_s = (params_s - self.emulator_x_mean) / self.emulator_x_std
+            mags_p = self.emulator(params_p)
+            mags_s = self.emulator(params_s)
+            if self.emulator_y_mean is not None:
+                mags_p = mags_p * self.emulator_y_std + self.emulator_y_mean
+                mags_s = mags_s * self.emulator_y_std + self.emulator_y_mean
+            flux_p = torch.pow(10.0, -0.4 * mags_p)
+            flux_s = torch.pow(10.0, -0.4 * mags_s)
+            mu = 5.0 * torch.log10(dist.clamp(min=1e-3)) - 5.0
+            mags_single = -2.5 * torch.log10(flux_p.clamp(min=1e-30))
+            mags_binary = -2.5 * torch.log10((flux_p + flux_s).clamp(min=1e-30))
+            out["apparent_mags_single"] = mags_single + mu.unsqueeze(-1)
+            out["apparent_mags_binary"] = mags_binary + mu.unsqueeze(-1)
+            # Backwards-compatible soft reconstruction for diagnostics.
+            out["apparent_mags"] = (
+                (1.0 - p_bin).unsqueeze(-1) * out["apparent_mags_single"]
+                + p_bin.unsqueeze(-1) * out["apparent_mags_binary"]
+            )
+        return out
 
 
 class PINNConfig:  # noqa: D401 — simple config container

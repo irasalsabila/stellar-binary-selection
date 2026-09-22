@@ -60,6 +60,10 @@ def main() -> int:
         default=str(DEFAULT_NOISE_PATH),
         help="JSON noise model from fit_noise_model.py; falls back to defaults if missing.",
     )
+    p.add_argument(
+        "--support-policy", choices=["reject", "nearest"], default="reject",
+        help="How to handle parameters outside the PARSEC convex hull.",
+    )
     args = p.parse_args()
 
     out = REPO_ROOT / args.output
@@ -89,9 +93,58 @@ def main() -> int:
         # the synthetic photometry is consistent with the frozen stellar
         # emulator used by the PI-NN photometric loss.
         grid = load_isochrone_grid(args.grid_backend)
+        max_age_gyr = 12.0
+        if hasattr(grid, "log_age_range"):
+            max_age_gyr = min(12.0, 10 ** float(grid.log_age_range[1]) / 1e9)
+            age = np.clip(age, 0.5, max_age_gyr)
+            print(f"  age support used: 0.5--{max_age_gyr:.3f} Gyr", flush=True)
         log_age = np.log10(age * 1e9)
+        if args.support_policy == "reject" and not hasattr(grid, "support_mask"):
+            raise RuntimeError("support-policy=reject requires a grid with convex-hull support metadata")
+        if args.support_policy == "reject" and hasattr(grid, "support_mask"):
+            # Rejection sampling preserves the requested binary fraction while
+            # ensuring both components are represented by the linear grid.
+            with tqdm(total=100, desc="PARSEC support", unit="attempt", leave=True) as support_bar:
+              for attempt in range(100):
+                ok_p = grid.support_mask(m1, log_age, feh)
+                ok_s = np.ones(n_total, dtype=bool)
+                if is_binary.any():
+                    ok_s[is_binary] = grid.support_mask(
+                        np.maximum(m2[is_binary], 0.09), log_age[is_binary], feh[is_binary]
+                    )
+                ok = ok_p & ok_s
+                support_bar.update(1)
+                support_bar.set_postfix(valid=f"{ok.mean():.1%}")
+                if ok.all():
+                    break
+                bad = ~ok
+                m1[bad] = sample_primary_mass(rng, int(bad.sum()), 0.6, 1.4)
+                age[bad] = rng.uniform(0.5, max_age_gyr, size=int(bad.sum()))
+                feh[bad] = sample_metallicity(rng, int(bad.sum()))
+                q_full[bad] = sample_mass_ratio(rng, int(bad.sum()))
+                q[bad] = np.where(is_binary[bad], q_full[bad], 0.0)
+                m2[bad] = q[bad] * m1[bad]
+                log_age[bad] = np.log10(age[bad] * 1e9)
+              else:
+                  raise RuntimeError("Could not sample a fully PARSEC-supported population after 100 attempts")
+            print(f"  support rejection attempts: {attempt + 1}", flush=True)
         abs_p = np.asarray(grid.absolute_magnitudes(m1, log_age, feh), dtype=np.float64)
-        abs_s = np.asarray(grid.absolute_magnitudes(np.maximum(m2, 1e-3), log_age, feh), dtype=np.float64)
+        fallback_p = int(getattr(grid, "last_nearest_fallback_count", 0))
+        abs_s = abs_p.copy()
+        fallback_s = 0
+        if is_binary.any():
+            abs_s[is_binary] = np.asarray(
+                grid.absolute_magnitudes(
+                    np.maximum(m2[is_binary], 0.09), log_age[is_binary], feh[is_binary]
+                ),
+                dtype=np.float64,
+            )
+            fallback_s = int(getattr(grid, "last_nearest_fallback_count", 0))
+        if fallback_p or fallback_s:
+            print(
+                f"  nearest-grid fallback rows: primary={fallback_p:,}, secondary={fallback_s:,}",
+                flush=True,
+            )
         abs_p = add_intrinsic_ms_scatter(rng, abs_p, args.intrinsic_scatter)
         abs_s = add_intrinsic_ms_scatter(rng, abs_s, args.intrinsic_scatter)
         bar.update(1)
@@ -100,6 +153,9 @@ def main() -> int:
         combined = np.empty_like(abs_p)
         for i, _ in enumerate(BANDS):
             combined[:, i] = combine_magnitudes(abs_p[:, i], abs_s[:, i])
+        # A nominal single has no secondary flux; do not evaluate an
+        # out-of-domain zero-mass companion or double its primary flux.
+        combined[~is_binary] = abs_p[~is_binary]
         bar.update(1)
 
         bar.set_postfix_str("distance modulus")

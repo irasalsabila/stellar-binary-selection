@@ -30,11 +30,16 @@ from stellar_binary_selection.utils import set_global_seed, write_run_metadata  
 from stellar_binary_selection.physics import load_isochrone_grid  # noqa: E402
 
 
-def sample_grid(grid, n: int, seed: int = 42):
+def sample_grid(grid, n: int, seed: int = 42, mass_min: float = 0.09, mass_max: float = 1.4):
     """Sample (mass, log_age, feh) and evaluate the isochrone grid."""
     rng = np.random.default_rng(seed)
-    mass = rng.uniform(0.6, 1.4, size=n)
-    log_age = rng.uniform(np.log10(0.5e9), np.log10(12e9), size=n)
+    mass = rng.uniform(mass_min, mass_max, size=n)
+    if hasattr(grid, "log_age_range"):
+        age_lo = max(0.5, 10 ** float(grid.log_age_range[0]) / 1e9)
+        age_hi = min(12.0, 10 ** float(grid.log_age_range[1]) / 1e9)
+    else:
+        age_lo, age_hi = 0.5, 12.0
+    log_age = rng.uniform(np.log10(age_lo * 1e9), np.log10(age_hi * 1e9), size=n)
     feh = rng.uniform(-1.0, 0.5, size=n)
     mags = grid.absolute_magnitudes(mass, log_age, feh)
     return (
@@ -62,6 +67,8 @@ def main() -> int:
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--target-mae", type=float, default=0.02, help="GATE M8 acceptance threshold (mag).")
+    p.add_argument("--mass-min", type=float, default=0.09)
+    p.add_argument("--mass-max", type=float, default=1.4)
     args = p.parse_args()
 
     set_global_seed(args.seed)
@@ -71,9 +78,9 @@ def main() -> int:
     print(f"  backend: {grid.name}", flush=True)
 
     print("Sampling training grid from the stellar model...", flush=True)
-    Xtr, ytr = sample_grid(grid, args.n_train, seed=args.seed)
-    Xva, yva = sample_grid(grid, args.n_val, seed=args.seed + 1)
-    Xte, yte = sample_grid(grid, args.n_test, seed=args.seed + 2)
+    Xtr, ytr = sample_grid(grid, args.n_train, seed=args.seed, mass_min=args.mass_min, mass_max=args.mass_max)
+    Xva, yva = sample_grid(grid, args.n_val, seed=args.seed + 1, mass_min=args.mass_min, mass_max=args.mass_max)
+    Xte, yte = sample_grid(grid, args.n_test, seed=args.seed + 2, mass_min=args.mass_min, mass_max=args.mass_max)
 
     Xtr, mu, sd = normalise(Xtr)
     Xva, _, _ = normalise(Xva, mu, sd)
